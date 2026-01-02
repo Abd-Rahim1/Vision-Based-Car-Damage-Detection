@@ -1,0 +1,273 @@
+import os
+import sys
+import argparse
+import cv2
+import torch
+import shutil
+import numpy as np
+import mlflow
+import random
+import json
+import time
+from pathlib import Path
+
+# Add project root to path BEFORE importing src
+sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
+
+from detectron2.engine import DefaultTrainer, default_setup, hooks
+from detectron2.config import get_cfg
+from detectron2 import model_zoo
+from detectron2.data import DatasetCatalog, MetadataCatalog
+from detectron2.structures import BoxMode
+
+# Import project utilities
+from src.utils.io import load_params, get_files, read_mask
+from src.utils.paths import ProjectPaths
+
+# ---------------------------------------------------------------------------
+# Data Loading Helper
+# ---------------------------------------------------------------------------
+def get_damage_dicts(img_dir, mask_dir):
+    """
+    Load images and masks into Detectron2 dataset format.
+    """
+    dataset_dicts = []
+    images = get_files(img_dir)
+    
+    for idx, img_path in enumerate(images):
+        filename = os.path.basename(img_path)
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+            
+        height, width = img.shape[:2]
+        
+        # Assume mask has same basename but .png extension
+        mask_filename = filename.replace(os.path.splitext(filename)[1], ".png")
+        mask_path = os.path.join(mask_dir, mask_filename)
+        
+        if not os.path.exists(mask_path):
+            continue
+
+        mask = read_mask(mask_path)
+        if mask is None:
+            continue
+            
+        objs = []
+        # Find contours for mask
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            if cv2.contourArea(contour) < 10: # Filter small noise
+                 continue
+                 
+            flattened = contour.flatten().tolist()
+            if len(flattened) < 6: # Need at least 3 points
+                continue
+                
+            obj = {
+                "bbox": cv2.boundingRect(contour),
+                "bbox_mode": BoxMode.XYWH_ABS,
+                "segmentation": [flattened],
+                "category_id": 0,
+            }
+            objs.append(obj)
+            
+        if objs:
+            record = {}
+            record["file_name"] = img_path
+            record["image_id"] = idx
+            record["height"] = height
+            record["width"] = width
+            record["annotations"] = objs
+            dataset_dicts.append(record)
+        
+    return dataset_dicts
+
+# ---------------------------------------------------------------------------
+# Configuration Setup
+# ---------------------------------------------------------------------------
+def setup_cfg(params, trial_idx, hparams):
+    """
+    Create and configure the Detectron2 config for a specific trial.
+    """
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file(params['training']['model_config']))
+    
+    cfg.DATASETS.TRAIN = ("car_damage_train",)
+    cfg.DATASETS.TEST = ("car_damage_val",)
+    cfg.DATALOADER.NUM_WORKERS = 2
+    
+    # -----------------------------------------------------------------------
+    # Parameter Application
+    # -----------------------------------------------------------------------
+    cfg.SOLVER.BASE_LR = hparams['base_lr']
+    cfg.SOLVER.IMS_PER_BATCH = hparams['batch_size']
+    cfg.SOLVER.MAX_ITER = hparams['max_iter']
+    
+    # Disable decay for this simple hpo setup unless specified
+    cfg.SOLVER.STEPS = [] 
+    
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128 
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = params['training']['num_classes']
+    
+    # -----------------------------------------------------------------------
+    # Requirement: Frequent Checkpoints & Image Size
+    # -----------------------------------------------------------------------
+    cfg.SOLVER.CHECKPOINT_PERIOD = 50
+    cfg.INPUT.MIN_SIZE_TRAIN = (512,)
+    cfg.INPUT.MAX_SIZE_TRAIN = 512
+    
+    # Unique output dir for trials
+    base_output_dir = ProjectPaths.DETECTRON2_ARTIFACTS_DIR
+    cfg.OUTPUT_DIR = os.path.join(base_output_dir, f"trial_{trial_idx}")
+    
+    # Force CUDA if available
+    if torch.cuda.is_available():
+        cfg.MODEL.DEVICE = "cuda"
+    else:
+        cfg.MODEL.DEVICE = "cpu"
+        print("Warning: CUDA not available, using CPU.")
+
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    return cfg
+
+# ---------------------------------------------------------------------------
+# Training Wrapper
+# ---------------------------------------------------------------------------
+class DamageTrainer(DefaultTrainer):
+    pass
+
+# ---------------------------------------------------------------------------
+# MLflow Logging Helper
+# ---------------------------------------------------------------------------
+def log_metrics_from_json(json_path):
+    """
+    Reads the metrics.json file generated by Detectron2 and logs metrics to MLflow.
+    """
+    if not os.path.exists(json_path):
+        print(f"Metrics file not found: {json_path}")
+        return
+
+    with open(json_path, 'r') as f:
+        for line in f:
+            try:
+                metric_dict = json.loads(line)
+                iteration = metric_dict.get('iteration', 0)
+                # Log all float values as metrics
+                for k, v in metric_dict.items():
+                    if k != 'iteration' and isinstance(v, (int, float)):
+                        mlflow.log_metric(k, v, step=iteration)
+            except json.JSONDecodeError:
+                continue
+
+# ---------------------------------------------------------------------------
+# Main Execution
+# ---------------------------------------------------------------------------
+def main():
+    params = load_params()
+    
+    # Setup MLflow Tracking
+    log_dir = params['training']['log_dir']
+    mlflow_tracking_abs_path = os.path.join(os.getcwd(), log_dir)
+    os.makedirs(mlflow_tracking_abs_path, exist_ok=True)
+    
+    # Windows-friendly File URI
+    mlflow.set_tracking_uri(ProjectPaths.MLFLOW_TRACKING_URI)
+    print(f"MLflow tracking URI set to: {mlflow.get_tracking_uri()}")
+    
+    experiment_name = "detectron2_segmentation"
+    try:
+        if not mlflow.get_experiment_by_name(experiment_name):
+            mlflow.create_experiment(experiment_name, artifact_location=ProjectPaths.DETECTRON2_ARTIFACTS_DIR.as_uri())
+    except Exception as e:
+        print(f"Experiment setup note: {e}")
+        
+    mlflow.set_experiment(experiment_name)
+    
+    # Register Data
+    processed_path = params['data']['processed_path']
+    for d in ["train", "val"]:
+        name = f"car_damage_{d}"
+        if name in DatasetCatalog.list():
+            DatasetCatalog.remove(name) # Reload to be safe
+        
+        try:
+            DatasetCatalog.register(name, lambda d=d: get_damage_dicts(
+                os.path.join(processed_path, d, "images"),
+                os.path.join(processed_path, d, "masks")
+            ))
+            MetadataCatalog.get(name).set(thing_classes=["damage"])
+        except Exception as e:
+            print(f"Error registering {name}: {e}")
+
+    # -----------------------------------------------------------------------
+    # HPO Loop
+    # -----------------------------------------------------------------------
+    hpo_config = params['training'].get('hpo', {})
+    if not hpo_config.get('enabled', False):
+        print("HPO not enabled. Running single default training...")
+        # (Could implement single run logic here, but user asked for HPO loop)
+        n_trials = 1
+        max_iter_choices = [params['training']['max_iter']]
+    else:
+        n_trials = hpo_config.get('n_trials', 3)
+        max_iter_choices = hpo_config.get('max_iter_choices', [100])
+
+    print(f"Starting {n_trials} Trials with options: {max_iter_choices}")
+    
+    # Ensure fresh output directory for artifacts root
+    base_output_dir = ProjectPaths.DETECTRON2_ARTIFACTS_DIR
+    os.makedirs(base_output_dir, exist_ok=True)
+
+    for trial_idx in range(n_trials):
+        print(f"\n{'='*20} Starting Trial {trial_idx} {'='*20}")
+        
+        # Sequentially select max_iter
+        # Ensure we don't go out of bounds if n_trials > len(max_iter_choices)
+        choice_idx = trial_idx % len(max_iter_choices)
+        selected_max_iter = max_iter_choices[choice_idx]
+        
+        # Prepare hyperparameters
+        hparams = {
+            'batch_size': params['training']['batch_size'],
+            'base_lr': params['training']['base_lr'],
+            'max_iter': selected_max_iter
+        }
+        
+        print(f"Trial {trial_idx} Parameters: {hparams}")
+        
+        # Configure this trial
+        cfg = setup_cfg(params, trial_idx, hparams)
+        
+        # Start MLflow Run
+        run_name = f"trial_{trial_idx}"
+        with mlflow.start_run(run_name=run_name) as run:
+            
+            # Log Parameters
+            mlflow.log_params(hparams)
+            mlflow.log_param("trial_index", trial_idx)
+            
+            # Train
+            os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+            with open(os.path.join(cfg.OUTPUT_DIR, "config.yaml"), "w") as f:
+                f.write(cfg.dump())
+                
+            trainer = DamageTrainer(cfg) 
+            trainer.resume_or_load(resume=False)
+            trainer.train()
+            
+            # Log Metrics (Post-training parsing)
+            metrics_path = os.path.join(cfg.OUTPUT_DIR, "metrics.json")
+            log_metrics_from_json(metrics_path)
+            
+            # Log Artifacts
+            for file_name in ["model_final.pth", "config.yaml", "metrics.json"]:
+                file_path = os.path.join(cfg.OUTPUT_DIR, file_name)
+                if os.path.exists(file_path):
+                    mlflow.log_artifact(file_path) # Logs to run artifact URI
+                    
+    print("\nAll trials completed. Run 'mlflow ui' to view results.")
+
+if __name__ == "__main__":
+    main()
