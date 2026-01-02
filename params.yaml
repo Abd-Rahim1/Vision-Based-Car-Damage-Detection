@@ -1,0 +1,28 @@
+data:
+  raw_path: "data/raw/CarDD_release/CarDD_SOD"
+  intermediate_path: "data/intermediate"
+  processed_path: "data/processed/segmentation"
+  
+base:
+  random_seed: 42
+
+preprocessing:
+  target_size: [512, 512]
+  normalize: true
+  
+visualization:
+  output_dir: "experiments/visualization/segmentation"
+
+training:
+  model_config: "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+  batch_size: 2
+  base_lr: 0.001
+  max_iter: 100
+  num_classes: 1
+  output_dir: "experiments/training_artifacts/detectron2"
+  log_dir: "experiments/mlflow"
+  hpo:
+    enabled: true
+    n_trials: 3
+    max_iter_choices: [100, 200, 300]
+

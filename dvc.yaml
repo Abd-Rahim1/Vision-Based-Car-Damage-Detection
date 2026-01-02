@@ -1,0 +1,55 @@
+stages:
+  analysis:
+    cmd: python scripts/segmentation/data_preparation/stage1_analysis.py
+    deps:
+      - scripts/segmentation/data_preparation/stage1_analysis.py
+      - data/raw/CarDD_release/CarDD_SOD
+    outs:
+      - experiments/visualization/segmentation/stage1_analysis
+
+  filtering:
+    cmd: python scripts/segmentation/data_preparation/stage2_filtering.py
+    deps:
+      - scripts/segmentation/data_preparation/stage2_filtering.py
+      - data/raw/CarDD_release/CarDD_SOD
+    outs:
+      - data/intermediate/filtered/segmentation
+      - experiments/visualization/segmentation/stage2_filtering
+
+  cleaning:
+    cmd: python scripts/segmentation/data_preparation/stage3_cleaning.py
+    deps:
+      - scripts/segmentation/data_preparation/stage3_cleaning.py
+      - data/intermediate/filtered/segmentation
+    outs:
+      - data/intermediate/cleaned/segmentation
+      - experiments/visualization/segmentation/stage3_cleaning
+
+  preprocessing:
+    cmd: python scripts/segmentation/data_preparation/stage4_preprocessing.py
+    deps:
+      - scripts/segmentation/data_preparation/stage4_preprocessing.py
+      - data/intermediate/cleaned/segmentation
+    outs:
+      - data/processed/segmentation/pool
+
+  split:
+    cmd: python scripts/segmentation/data_preparation/stage5_split.py
+    deps:
+      - scripts/segmentation/data_preparation/stage5_split.py
+      - data/processed/segmentation/pool
+    outs:
+      - data/processed/segmentation/train
+      - data/processed/segmentation/val
+      - data/processed/segmentation/test
+      - experiments/visualization/segmentation/stage5_split
+
+  post_analysis:
+    cmd: python scripts/segmentation/data_preparation/stage6_post_analysis.py
+    deps:
+      - scripts/segmentation/data_preparation/stage6_post_analysis.py
+      - data/processed/segmentation/train
+      - data/processed/segmentation/val
+      - data/processed/segmentation/test
+    outs:
+      - experiments/visualization/segmentation/stage6_post_analysis

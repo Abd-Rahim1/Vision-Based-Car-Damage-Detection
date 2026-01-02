@@ -1,0 +1,20 @@
+schema: '2.0'
+stages:
+  analysis:
+    cmd: python scripts/segmentation/data_preparation/stage1_analysis.py
+    deps:
+    - path: data/raw/CarDD_release/CarDD_SOD
+      hash: md5
+      md5: a553a861d8e38c135b8eaac56c98be2d.dir
+      size: 3077725718
+      nfiles: 12003
+    - path: scripts/segmentation/data_preparation/stage1_analysis.py
+      hash: md5
+      md5: 1c746af706d7d56f08b60fd9245ee6aa
+      size: 4064
+    outs:
+    - path: experiments/visualization/segmentation/stage1_analysis
+      hash: md5
+      md5: d67f1548e559ec453d0fe2b81fc7c1cb.dir
+      size: 485439
+      nfiles: 6
