@@ -1,0 +1,57 @@
+data_preparation:
+  # Input/Output paths
+  paths:
+    raw_data: "data/raw/CarDD_release/CarDD_COCO"
+    processed_data: "data/processed/detection"
+    intermediate_data: "data/intermediate"
+    dvc_tracking: "dataset/detection"  
+  
+  # Dataset versions for DVC tracking
+  versions:
+    converted: "v1"
+    filtered: "v2" 
+    cleaned: "v3"
+    preprocessed: "v4"
+  
+  # Exploration parameters
+  exploration:
+    sample_size: 20
+    output_size: [800, 600]
+    colors: [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255]]
+  
+  # Filtering parameters
+  filtering:
+    min_image_size: [100, 100]
+    max_file_size_mb: 10
+    allowed_extensions: ['.jpg', '.jpeg', '.png']
+    min_annotations_per_image: 1
+  
+  # Cleaning parameters
+  cleaning:
+    min_bbox_area: 400        # Increased from 100 to 400 pixels²
+    min_bbox_dimension: 10    # Increased from 5 to 10 pixels
+    max_bbox_aspect_ratio: 20.0  # Increased from 10.0 to 20.0
+    remove_duplicate_bboxes: true
+    iou_threshold: 0.8
+    remove_out_of_bounds: true
+  
+  # YOLO preprocessing parameters
+  yolo:
+    image_size: 640
+    normalize: true
+    create_symlinks: false
+
+damage_categories:
+  - "dent"
+  - "scratch" 
+  - "crack"
+  - "broken"
+  - "glass_shatter"
+  - "lamp_broken"
+  - "tire_flat"
+  - "deformation"
+
+dvc:
+  metrics_file: "metrics/detection_metrics.json"
+  params_file: "configs/params.yaml"
+  remote: "origin"
